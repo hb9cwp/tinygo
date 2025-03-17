@@ -122,7 +122,7 @@ func (c *Config) GC() string {
 // that can be traced by the garbage collector.
 func (c *Config) NeedsStackObjects() bool {
 	switch c.GC() {
-	case "conservative", "custom", "precise":
+	case "conservative", "custom", "precise", "boehm":
 		for _, tag := range c.BuildTags() {
 			if tag == "tinygo.wasm" {
 				return true
@@ -247,6 +247,15 @@ func MuslArchitecture(triple string) string {
 	return CanonicalArchName(triple)
 }
 
+// Returns true if the libc needs to include malloc, for the libcs where this
+// matters.
+func (c *Config) LibcNeedsMalloc() bool {
+	if c.GC() == "boehm" && c.Target.Libc == "wasi-libc" {
+		return true
+	}
+	return false
+}
+
 // LibcPath returns the path to the libc directory. The libc path will be a libc
 // path in the cache directory (which might not yet be built).
 func (c *Config) LibcPath(name string) string {
@@ -265,9 +274,14 @@ func (c *Config) LibcPath(name string) string {
 		archname += "-" + c.Target.Libc
 	}
 
+	options := ""
+	if c.LibcNeedsMalloc() {
+		options += "+malloc"
+	}
+
 	// No precompiled library found. Determine the path name that will be used
 	// in the build cache.
-	return filepath.Join(goenv.Get("GOCACHE"), name+"-"+archname)
+	return filepath.Join(goenv.Get("GOCACHE"), name+options+"-"+archname)
 }
 
 // DefaultBinaryExtension returns the default extension for binaries, such as

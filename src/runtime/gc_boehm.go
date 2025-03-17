@@ -4,7 +4,6 @@ package runtime
 
 import (
 	"internal/gclayout"
-	"internal/reflectlite"
 	"internal/task"
 	"unsafe"
 )
@@ -19,11 +18,15 @@ var gcLock task.PMutex
 func initHeap() {
 	libgc_init()
 
-	libgc_set_push_other_roots(gcCallbackPtr)
+	// Call GC_set_push_other_roots(gcCallback) in C because of function
+	// signature differences that do matter in WebAssembly.
+	gcInit()
 }
 
-var gcCallbackPtr = reflectlite.ValueOf(gcCallback).UnsafePointer()
+//export tinygo_runtime_bdwgc_init
+func gcInit()
 
+//export tinygo_runtime_bdwgc_callback
 func gcCallback() {
 	// Mark the system stack and (if we're on a goroutine stack) also the
 	// current goroutine stack.

@@ -267,6 +267,9 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 		DefaultStackSize: 1024 * 64, // 64kB
 		GDB:              []string{"gdb"},
 		PortReset:        "false",
+		ExtraFiles: []string{
+			"src/runtime/gc_boehm.c",
+		},
 	}
 
 	// Configure target based on GOARCH.

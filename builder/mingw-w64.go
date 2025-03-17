@@ -37,7 +37,7 @@ var libMinGW = Library{
 			"-I" + headerPath,
 		}
 	},
-	librarySources: func(target string) ([]string, error) {
+	librarySources: func(target string, _ bool) ([]string, error) {
 		// These files are needed so that printf and the like are supported.
 		sources := []string{
 			"mingw-w64-crt/stdio/ucrt_fprintf.c",

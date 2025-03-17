@@ -119,7 +119,7 @@ var libWasiLibc = Library{
 		return nil
 	},
 	sourceDir: func() string { return filepath.Join(goenv.Get("TINYGOROOT"), "lib/wasi-libc") },
-	librarySources: func(target string) ([]string, error) {
+	librarySources: func(target string, libcNeedsMalloc bool) ([]string, error) {
 		type filePattern struct {
 			glob    string
 			exclude []string
@@ -166,6 +166,11 @@ var libWasiLibc = Library{
 			{glob: "libc-bottom-half/cloudlibc/src/libc/*/*.c"},
 			{glob: "libc-bottom-half/cloudlibc/src/libc/sys/*/*.c"},
 			{glob: "libc-bottom-half/sources/*.c"},
+		}
+
+		// We're using the Boehm GC, so we need a heap implementation in the libc.
+		if libcNeedsMalloc {
+			globs = append(globs, filePattern{glob: "dlmalloc/src/dlmalloc.c"})
 		}
 
 		// See: LIBC_TOP_HALF_MUSL_SOURCES in the Makefile
