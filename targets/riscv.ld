@@ -16,11 +16,32 @@ SECTIONS
     /* Put the stack at the bottom of RAM, so that the application will
      * crash on stack overflow instead of silently corrupting memory.
      * See: http://blog.japaric.io/stack-overflow-protection/ */
-    .stack (NOLOAD) :
+    .stack0 (NOLOAD) :
     {
         . = ALIGN(16);
         . += _stack_size;
-        _stack_top = .;
+        _stack0_top = .;
+    } >RAM
+
+    .stack1 (NOLOAD) :
+    {
+        . = ALIGN(16);
+        . += _stack_size;
+        _stack1_top = .;
+    } >RAM
+
+    .stack2 (NOLOAD) :
+    {
+        . = ALIGN(16);
+        . += _stack_size;
+        _stack2_top = .;
+    } >RAM
+
+    .stack3 (NOLOAD) :
+    {
+        . = ALIGN(16);
+        . += _stack_size;
+        _stack3_top = .;
     } >RAM
 
     /* Start address (in flash) of .data, used by startup code. */

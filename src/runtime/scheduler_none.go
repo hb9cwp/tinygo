@@ -2,7 +2,10 @@
 
 package runtime
 
-import "internal/task"
+import (
+	"internal/task"
+	"runtime/interrupt"
+)
 
 const hasScheduler = false
 
@@ -66,4 +69,12 @@ func scheduler(returnAtDeadlock bool) {
 // This is always the current stack pointer.
 func getSystemStackPointer() uintptr {
 	return getCurrentStackPointer()
+}
+
+func lockAtomics() interrupt.State {
+	return interrupt.Disable()
+}
+
+func unlockAtomics(mask interrupt.State) {
+	interrupt.Restore(mask)
 }

@@ -9,15 +9,34 @@ type stringer interface {
 	String() string
 }
 
+// Color the 'print' and 'println' output according to the current CPU.
+// This may be helpful for debugging, but should be disabled otherwise.
+const cpuColoredPrint = false
+
 // Lock to make sure print calls do not interleave.
 // This is a no-op lock on systems that do not have parallelism.
 var printLock task.PMutex
 
 func printlock() {
 	printLock.Lock()
+	if cpuColoredPrint {
+		switch currentCPU() {
+		case 1:
+			printstring("\x1b[32m") // green
+		case 2:
+			printstring("\x1b[33m") // yellow
+		case 3:
+			printstring("\x1b[34m") // blue
+		}
+	}
 }
 
 func printunlock() {
+	if cpuColoredPrint {
+		if currentCPU() != 0 {
+			printstring("\x1b[0m") // reset colored output
+		}
+	}
 	printLock.Unlock()
 }
 

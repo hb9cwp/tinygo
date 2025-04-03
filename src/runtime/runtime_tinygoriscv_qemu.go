@@ -4,7 +4,9 @@ package runtime
 
 import (
 	"device/riscv"
+	"math/bits"
 	"runtime/volatile"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -15,18 +17,67 @@ import (
 // (This is not a standard, just the default used by QEMU).
 type timeUnit int64
 
+const numCPU = 4
+
 //export main
 func main() {
-	preinit()
-
 	// Set the interrupt address.
 	// Note that this address must be aligned specially, otherwise the MODE bits
 	// of MTVEC won't be zero.
 	riscv.MTVEC.Set(uintptr(unsafe.Pointer(&handleInterruptASM)))
 
+	// Enable software interrupts. We'll need them to wake up other cores.
+	riscv.MIE.SetBits(riscv.MIE_MSIE)
+
+	// If we're not hart 0, wait until we get the signal everything has been set
+	// up.
+	if hartID := riscv.MHARTID.Get(); hartID != 0 {
+		// Wait until we get the signal this hart is ready to start.
+		// Note that interrupts are disabled, which means that the interrupt
+		// isn't actually taken. But we can still wait for it using wfi.
+		for riscv.MIP.Get()&riscv.MIP_MSIP == 0 {
+			riscv.Asm("wfi")
+		}
+
+		// Clear the software interrupt.
+		aclintMSWI.MSIP[hartID].Set(0)
+
+		// Now that we've cleared the software interrupt, we can enable
+		// interrupts as was already done on hart 0.
+		riscv.MSTATUS.SetBits(riscv.MSTATUS_MIE)
+
+		// Now start running the scheduler on this core.
+		schedulerLock.Lock()
+		scheduler(false)
+
+		// The scheduler exited, which means main returned and the program
+		// should exit.
+		// Make sure hart 0 is woken (it might be asleep at the moment).
+		if sleepingHarts&0b1 != 0 {
+			// Hart 0 is currently sleeping, wake it up.
+			sleepingHarts &^= 0b1 // clear the bit
+			aclintMSWI.MSIP[0].Set(1)
+		}
+
+		// Make sure hart 0 can actually enter the scheduler (since we still
+		// have the scheduler lock) to realize the program has exited.
+		schedulerLock.Unlock()
+
+		// Now wait until the program exits. This shouldn't take very long.
+		for {
+			riscv.Asm("wfi")
+		}
+	}
+
 	// Enable global interrupts now that they've been set up.
 	// This is currently only for timer interrupts.
 	riscv.MSTATUS.SetBits(riscv.MSTATUS_MIE)
+
+	// Set all MTIMECMP registers to a value that clears the MTIP bit in MIP.
+	// If we don't do this, the wfi instruction won't work as expected.
+	for i := 0; i < numCPU; i++ {
+		aclintMTIMECMP[i].Set(0xffff_ffff_ffff_ffff)
+	}
 
 	run()
 	exit(0)
@@ -42,12 +93,13 @@ func handleInterrupt() {
 	if cause&(1<<31) != 0 {
 		// Topmost bit is set, which means that it is an interrupt.
 		switch code {
-		case riscv.MachineTimerInterrupt:
-			// Signal timeout.
-			timerWakeup.Set(1)
-			// Disable the timer, to avoid triggering the interrupt right after
-			// this interrupt returns.
-			riscv.MIE.ClearBits(riscv.MIE_MTIE)
+		// Note: software and timer interrupts are handled by disabling
+		// interrupts and waiting for the corresponding bit in MIP to change.
+		// (This is to avoid TOCTOU issues between checking for a flag and the
+		// wfi instruction).
+		default:
+			print("fatal error: unknown interrupt")
+			abort()
 		}
 	} else {
 		// Topmost bit is clear, so it is an exception of some sort.
@@ -69,23 +121,27 @@ func nanosecondsToTicks(ns int64) timeUnit {
 	return timeUnit(ns / 100) // one tick is 100ns
 }
 
-var timerWakeup volatile.Register8
-
 func sleepTicks(d timeUnit) {
-	// Enable the timer.
-	target := uint64(ticks() + d)
-	aclintMTIMECMP.Set(target)
-	riscv.MIE.SetBits(riscv.MIE_MTIE)
+	// Disable all interrupts.
+	riscv.MSTATUS.ClearBits(riscv.MSTATUS_MIE)
 
-	// Wait until it fires.
-	for {
-		if timerWakeup.Get() != 0 {
-			timerWakeup.Set(0)
-			// Disable timer.
-			break
-		}
+	// Configure timeout.
+	target := uint64(ticks() + d)
+	hartID := riscv.MHARTID.Get()
+	aclintMTIMECMP[hartID].Set(target)
+
+	// Wait until the timeout is hit.
+	riscv.MIE.SetBits(riscv.MIE_MTIE)
+	for riscv.MIP.Get()&riscv.MIP_MTIP == 0 {
 		riscv.Asm("wfi")
 	}
+	riscv.MIE.ClearBits(riscv.MIE_MTIE)
+
+	// Set MTIMECMP to a high value so that MTIP goes low.
+	aclintMTIMECMP[hartID].Set(0xffff_ffff_ffff_ffff)
+
+	// Re-enable all interrupts.
+	riscv.MSTATUS.SetBits(riscv.MSTATUS_MIE)
 }
 
 func ticks() timeUnit {
@@ -100,7 +156,7 @@ func ticks() timeUnit {
 			return timeUnit(lowBits) | (timeUnit(highBits) << 32)
 		}
 		// Retry, because there was a rollover in the low bits (happening every
-		// 429 days).
+		// ~7 days).
 		highBits = newHighBits
 	}
 }
@@ -122,7 +178,10 @@ var (
 		low  volatile.Register32
 		high volatile.Register32
 	})(unsafe.Pointer(uintptr(0x0200_bff8)))
-	aclintMTIMECMP = (*volatile.Register64)(unsafe.Pointer(uintptr(0x0200_4000)))
+	aclintMTIMECMP = (*[4095]volatile.Register64)(unsafe.Pointer(uintptr(0x0200_4000)))
+	aclintMSWI     = (*struct {
+		MSIP [4095]volatile.Register32
+	})(unsafe.Pointer(uintptr(0x0200_0000)))
 )
 
 func putchar(c byte) {
@@ -137,6 +196,91 @@ func getchar() byte {
 func buffered() int {
 	// dummy, TODO
 	return 0
+}
+
+// Define the various spinlocks needed by the runtime.
+var (
+	schedulerLock spinLock
+	futexLock     spinLock
+	atomicsLock   spinLock
+)
+
+type spinLock struct {
+	atomic.Uint32
+}
+
+func (l *spinLock) Lock() {
+	// Try to replace 0 with 1. Once we succeed, the lock has been acquired.
+	for !l.Uint32.CompareAndSwap(0, 1) {
+		// Hint to the CPU that this core is just waiting, and the core can go
+		// into a lower energy state.
+		// This is a no-op in QEMU TCG (but added here for completeness):
+		// https://github.com/qemu/qemu/blob/v9.2.3/target/riscv/insn_trans/trans_rvi.c.inc#L856
+		riscv.Asm("pause")
+	}
+}
+
+func (l *spinLock) Unlock() {
+	// Safety check: the spinlock should have been locked.
+	if schedulerAsserts && l.Uint32.Load() != 1 {
+		runtimePanic("unlock of unlocked spinlock")
+	}
+
+	// Unlock the lock. Simply write 0, because we already know it is locked.
+	l.Uint32.Store(0)
+}
+
+func currentCPU() uint32 {
+	return uint32(riscv.MHARTID.Get())
+}
+
+func startSecondaryCores() {
+	// Start all the other cores besides hart 0.
+	for hart := 1; hart < numCPU; hart++ {
+		// Signal the given hart it is ready to start using a software
+		// interrupt.
+		aclintMSWI.MSIP[hart].Set(1)
+	}
+}
+
+// Bitset of harts that are currently sleeping in schedulerUnlockAndWait.
+// This supports up to 8 harts.
+// This variable may only be accessed with the scheduler lock held.
+var sleepingHarts uint8
+
+// Put the scheduler to sleep, since there are no tasks to run.
+// This will unlock the scheduler lock, and must be called with the scheduler
+// lock held.
+func schedulerUnlockAndWait() {
+	hartID := riscv.MHARTID.Get()
+
+	// Mark the current hart as sleeping.
+	sleepingHarts |= uint8(1 << hartID)
+
+	// Wait for a software interrupt, with interrupts disabled and the scheduler
+	// unlocked.
+	riscv.MSTATUS.ClearBits(riscv.MSTATUS_MIE)
+	schedulerLock.Unlock()
+	for riscv.MIP.Get()&riscv.MIP_MSIP == 0 {
+		riscv.Asm("wfi")
+	}
+	aclintMSWI.MSIP[hartID].Set(0)
+	schedulerLock.Lock()
+	riscv.MSTATUS.SetBits(riscv.MSTATUS_MIE)
+}
+
+// Wake another core, if one is sleeping. Must be called with the scheduler lock
+// held.
+func schedulerWake() {
+	// Look up the lowest-numbered hart that is sleeping.
+	// Returns 8 if there are no sleeping harts.
+	hart := bits.TrailingZeros8(sleepingHarts)
+
+	if hart < 8 {
+		// There is a sleeping hart. Wake it.
+		sleepingHarts &^= 1 << hart  // clear the bit
+		aclintMSWI.MSIP[hart].Set(1) // send software interrupt
+	}
 }
 
 func abort() {
