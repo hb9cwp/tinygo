@@ -16,7 +16,6 @@ func run() {
 	initRand()
 	initAll()
 	callMain()
-	mainExited = true
 }
 
 //go:linkname sleep time.Sleep

@@ -27,6 +27,8 @@ const hasScheduler = true
 // concurrency, it does not have parallelism.
 const hasParallelism = false
 
+var mainExited bool
+
 // Queues used by the scheduler.
 var (
 	runqueue           task.Queue
